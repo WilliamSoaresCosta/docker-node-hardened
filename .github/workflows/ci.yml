@@ -1,0 +1,85 @@
+# Em todo PR e push: testes, build e scan da imagem.
+# Em tag v* (ex.: v0.1.0): publica a imagem aprovada no GitHub Container Registry.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/williamsoarescosta/docker-node-hardened
+  # Trivy baixado do release oficial, com versão fixa e checksum conferido.
+  # Atualizar de propósito: versão nova + checksum do arquivo trivy_<versão>_checksums.txt do release.
+  TRIVY_VERSION: "0.75.0"
+  TRIVY_SHA256: "c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: npm test
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # só usado no push da tag
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]] || VERSION="${GITHUB_SHA::12}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          docker build \
+            --build-arg APP_VERSION="${VERSION}" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            -t "${IMAGE}:${VERSION}" .
+          docker save "${IMAGE}:${VERSION}" -o /tmp/image.tar
+
+      - name: Instalar Trivy (versão fixa + checksum)
+        run: |
+          FILE="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "/tmp/${FILE}" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${FILE}"
+          echo "${TRIVY_SHA256}  /tmp/${FILE}" | sha256sum -c -
+          tar -xzf "/tmp/${FILE}" -C /tmp trivy
+
+      - name: Trivy (barra HIGH e CRITICAL que já têm correção)
+        run: |
+          /tmp/trivy image --input /tmp/image.tar \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 --no-progress
+
+      - name: Smoke test (o container sobe e responde?)
+        run: |
+          docker run -d --rm --name app -p 3000:3000 "${IMAGE}:${VERSION}"
+          for i in $(seq 1 15); do curl -sf http://127.0.0.1:3000/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:3000/version
+          [[ "$(docker exec app id -u)" != "0" ]] || { echo "::error::container rodando como root"; exit 1; }
+          docker stop app
+
+      - name: Publicar no GHCR (só em tag)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${GH_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:${VERSION}"
