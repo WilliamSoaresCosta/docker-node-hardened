@@ -12,6 +12,8 @@ suporte.
 Podia ter colocado tudo num `.trivyignore` e seguido. Preferi resolver. Contei a história
 completa aqui: [26 vulnerabilidades e nenhuma era do meu código](https://williamsoares.com/blog/imagem-docker-26-vulnerabilidades).
 
+<p align="center"><img src="assets/fluxo.svg" alt="Esteira: testes, build, Trivy, smoke test e GHCR" width="100%" /></p>
+
 ## O que mudei no Dockerfile
 
 - multi-stage: o `npm ci` roda num estágio separado e só o `node_modules` vai para a imagem final
